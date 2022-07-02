@@ -7,6 +7,8 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const port = process.env.PORT || 5000;
 
+const stripe = require("stripe")(`${process.env.STRIPE_SECRET_KEY}`);
+
 app.use(cors());
 app.use(express.json());
 
@@ -47,6 +49,23 @@ async function run() {
       .collection("bookings");
     const reviewCollection = client.db("creative_agency").collection("reviews");
     const userCollection = client.db("creative_agency").collection("users");
+    const paymentCollection = client
+      .db("creative_agency")
+      .collection("payment");
+
+    const verifyAdmin = async (req, res, next) => {
+      const requester = req.decoded.email;
+      console.log(requester);
+      const requesterAccount = await userCollection.findOne({
+        email: requester,
+      });
+      if (requesterAccount.role == "admin") {
+        next();
+      } else {
+        res.status(403).send({ message: "forbidden Access" });
+      }
+    };
+
     //  get orders on home page
     app.get("/service", async (req, res) => {
       const query = {};
@@ -68,25 +87,91 @@ async function run() {
       }
     });
 
-    // get order by email
+    // post booking data into database
 
-    app.get("/bookingService", verifyToken, async (req, res) => {
-      const email = req.query.email;
-      const decodedEmail = req.decoded.email;
-      // console.log(email);
-      if (email === decodedEmail) {
-        const query = { email: email };
-        const bookings = await bookingCollection.find(query).toArray();
-        return res.send(bookings);
+    app.post("/create-payment-intent", verifyToken, async (req, res) => {
+      const service = req.body;
+      // console.log(service);
+      const price = service.price;
+      // console.log(price);
+      const amount = price * 100;
+      console.log(amount);
+      if (amount) {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount,
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+
+        return res.send({ clientSecret: paymentIntent.client_secret });
       } else {
-        return res.status(403).send({ message: "forbidden access" });
+        return res.send({ clientSecret: "" });
       }
     });
+
+    // update booking information
+    app.patch("/cardBooking/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const payment = req.body;
+      const filter = { _id: ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          paid: true,
+          transactionId: payment.transactionId,
+        },
+      };
+
+      const result = await paymentCollection.insertOne(payment);
+      const updatedBooking = await bookingCollection.updateOne(
+        filter,
+        updatedDoc
+      );
+      res.send(updatedBooking);
+    });
+
+    // get order by email
+
+    app.get("/bookingService", async (req, res) => {
+      const email = req.query.email;
+      console.log(email);
+      // console.log(email);
+      const query = { email: email };
+      console.log(query);
+      const bookings = await bookingCollection.find(query).toArray();
+      return res.send(bookings);
+    });
+
+    // booking for particular id for payment
+    app.get("/booking/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: ObjectId(id) };
+      const booking = await bookingCollection.findOne(query);
+      res.send(booking);
+    });
+
+    //pay route booking by particular id
+    // app.get("/mybooking/:id", async (req, res) => {
+    //   console.log(req.params);
+    //   const id = req.params.id;
+
+    //   const query = { _id: ObjectId(id) };
+    //   const booking = await bookingCollection.findOne(query);
+    //   console.log(booking);
+    //   res.send(booking);
+    // });
 
     // post booking data
     app.post("/booking", async (req, res) => {
       const booking = req.body;
       const result = bookingCollection.insertOne(booking);
+      res.send(result);
+    });
+
+    // get booking data for all user information
+    app.get("/booking", async (req, res) => {
+      const query = {};
+      const cursor = bookingCollection.find(query);
+      const result = await cursor.toArray();
       res.send(result);
     });
 
@@ -114,6 +199,35 @@ async function run() {
       res.send(result);
     });
 
+    // get all user email for make an admin
+    app.get("/userss", verifyToken, async (req, res) => {
+      const allusers = await userCollection.find().toArray();
+      res.send(allusers);
+    });
+
+    // check already an admin ki nh admin thakei oi route gulo dekhbe
+    app.get("/admin/:email", async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email: email });
+      const isAdmin = user.role === "admin";
+      res.send({ admin: isAdmin });
+    });
+
+    // give user admin role jeno keo data churi kore kaj korte nh pare
+    app.put(
+      "/users/admin/:email",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const email = req.params.email;
+        const filter = { email: email };
+        const updateDoc = {
+          $set: { role: "admin" },
+        };
+        const result = await userCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      }
+    );
     // create user for admin role i need email
     app.put("/users/:email", async (req, res) => {
       const email = req.params.email;
